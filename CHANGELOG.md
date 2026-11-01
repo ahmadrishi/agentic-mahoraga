@@ -37,8 +37,8 @@ The first public release.
   `none`), vcs (`git`) and verify (`command`), behind a documented contract
   ([`docs/ADAPTER-CONTRACT.md`](docs/ADAPTER-CONTRACT.md)). Stubs exist for Azure DevOps, Linear,
   Confluence, Google Docs and Notion.
-- **Install** — as a Claude Code plugin (`/plugin install mahoraga --marketplace
-  ahmadrishi/agentic-mahoraga`, tested with Claude Code 2.1.290), or `bash cli/mahoraga install --target <dir>`
+- **Install** — as a Claude Code plugin (`/plugin marketplace add ahmadrishi/agentic-mahoraga`, then
+  `/plugin install mahoraga@agentic-mahoraga`; tested on Claude Code 2.1.290 and 2.1.316), or `bash cli/mahoraga install --target <dir>`
   to copy the GUARD skills to another agent. The npm package is not published yet.
 - **Safety gates** — [`SECURITY.md`](SECURITY.md); `scripts/leak-scan.sh` (credential, private-data and
   personal-path scan); `scripts/adapter-security-check.sh`; a committed dependency allowlist; and a

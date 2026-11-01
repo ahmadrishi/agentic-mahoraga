@@ -3,7 +3,8 @@
   "name": "agentic-mahoraga",
   "description": "The Agentic Mahoraga plugin catalog: forge file:line-grounded skills from your code and replay your own shipped tickets blind against a bare-model baseline.",
   "owner": {
-    "name": "Agentic Mahoraga contributors"
+    "name": "Ahmad Rishi",
+    "url": "https://github.com/ahmadrishi"
   },
   "metadata": {
     "version": "0.1.0"
@@ -13,13 +14,23 @@
       "name": "mahoraga",
       "description": "Forges file:line-grounded skills from your code, then replays your own shipped tickets blind — against a bare-model baseline — to measure whether they help. Ships the GUARD pack (8 skills + 2 Claude Code hooks), the adapt/prove engine, and `mahoraga loop`, a measured improve loop that keeps an edit only if it helps on later, held-out tickets (Linux + Docker).",
       "author": {
-        "name": "Agentic Mahoraga contributors"
+        "name": "Ahmad Rishi",
+        "url": "https://github.com/ahmadrishi"
       },
       "category": "code-quality",
       "license": "MIT",
       "version": "0.1.0",
       "homepage": "https://github.com/ahmadrishi/agentic-mahoraga",
-      "source": "./"
+      "source": "./",
+      "keywords": [
+        "skills",
+        "agent-skills",
+        "evals",
+        "blind-eval",
+        "code-grounding",
+        "guardrails",
+        "claude-code"
+      ]
     }
   ]
 }

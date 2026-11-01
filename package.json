@@ -17,5 +17,18 @@
     "LICENSE"
   ],
   "repository": "https://github.com/ahmadrishi/agentic-mahoraga",
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "skills",
+    "agent-skills",
+    "evals",
+    "blind-eval",
+    "code-grounding",
+    "guardrails",
+    "claude-code"
+  ],
+  "author": {
+    "name": "Ahmad Rishi",
+    "url": "https://github.com/ahmadrishi"
+  }
 }

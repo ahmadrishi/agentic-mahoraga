@@ -6,7 +6,7 @@
 
 **Forges file:line-grounded skills from your code, then replays your own shipped tickets blind — against a bare-model baseline — to measure whether they help.**
 
-[![CI](https://github.com/ahmadrishi/agentic-mahoraga/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmadrishi/agentic-mahoraga/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/ahmadrishi/agentic-mahoraga?label=version&color=3fb9a8)](CHANGELOG.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Status](https://img.shields.io/badge/status-early%20v0.1-orange.svg)](#limits) [![Claude Code](https://img.shields.io/badge/Claude%20Code-tested%202.1.290-8A63D2.svg)](#install)
+[![CI](https://github.com/ahmadrishi/agentic-mahoraga/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmadrishi/agentic-mahoraga/actions/workflows/ci.yml) [![Version](https://img.shields.io/github/v/tag/ahmadrishi/agentic-mahoraga?label=version&color=3fb9a8)](CHANGELOG.md) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Status](https://img.shields.io/badge/status-early%20v0.1-orange.svg)](#limits) [![Claude Code](https://img.shields.io/badge/Claude%20Code-2.1.290%20to%202.1.316-8A63D2.svg)](#install)
 
 [Install](#install) · [How it works](#how-it-works) · [Quickstart](#quickstart) · [Limits](#limits) · [Security](#security) · [Docs](docs/README.md)
 
@@ -16,11 +16,15 @@
 
 ## Install
 
-In Claude Code (tested with 2.1.290):
+In Claude Code (tested on 2.1.290 and 2.1.316):
 
 ```
-/plugin install mahoraga --marketplace ahmadrishi/agentic-mahoraga
+/plugin marketplace add ahmadrishi/agentic-mahoraga
+/plugin install mahoraga@agentic-mahoraga
 ```
+
+From a terminal on Claude Code 2.1.316 or later, one command does both:
+`claude plugin install mahoraga --marketplace ahmadrishi/agentic-mahoraga`.
 
 Then, in your repo, run `/mahoraga-init` (see [Quickstart](#quickstart)).
 

@@ -10,6 +10,8 @@
 
 [Install](#install) · [How it works](#how-it-works) · [Quickstart](#quickstart) · [Limits](#limits) · [Security](#security) · [Docs](docs/README.md)
 
+<sub>The name comes from Mahoraga, a character in the anime and manga <i>Jujutsu Kaisen</i>. This is an independent project, not affiliated with or endorsed by its creators or publishers.</sub>
+
 </div>
 
 ## Install
@@ -78,8 +80,8 @@ from.
 skill where a doc corpus exists) + a generated `CLAUDE.md`. It does **not** conjure a large
 platform-specific skill library for free — it *accelerates* building one.
 
-*Named for the Jujutsu Kaisen construct whose Wheel of the Eightfold adapts to any attack it
-survives once — the aspiration the project is built toward.*
+*Named for Mahoraga from the anime and manga Jujutsu Kaisen, whose Wheel of the Eightfold adapts to any
+attack it survives once — the aspiration this project is built toward.*
 
 ## Quickstart
 

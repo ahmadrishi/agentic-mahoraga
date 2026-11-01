@@ -1,0 +1,19 @@
+diff --git a/svc/billing/refunds.py b/svc/billing/refunds.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/svc/billing/refunds.py
+@@ -0,0 +1,13 @@
++"""Refund calculations for the billing service."""
++
++
++def compute_prorated_refund(paid_cents: int, total_days: int, used_days: int) -> int:
++    """Return the refundable amount in cents for the unused part of a paid term.
++
++    The refund is the paid amount scaled by the fraction of the term left unused.
++    A fully-used (or over-used) term refunds zero; the result is rounded to whole cents.
++    """
++    if total_days <= 0:
++        return 0
++    remaining = max(0, total_days - used_days)
++    return round(paid_cents * remaining / total_days)

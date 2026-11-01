@@ -1,0 +1,11 @@
+# Single source of truth for the project's identity.
+# The codename is decoupled from the machine identity so a later rename is a one-file change.
+# Code and docs reference these values; they do not hard-code the name.
+
+display_name: "Agentic Mahoraga"          # human-facing codename
+cli_name: "mahoraga"                        # binary / npm package / command prefix (the machine identity)
+repo: "agentic-mahoraga"                    # git repository name
+tagline: "Forges file:line-grounded skills from your code, then replays your own shipped tickets blind — against a bare-model baseline — to measure whether they help."
+motto: "Adapt to the stack — measure against your own history."
+license: "MIT"
+skill_schema_version: "0.1.0"               # semver of the emitted SKILL.md contract (core/schema/SKILL.schema.md)

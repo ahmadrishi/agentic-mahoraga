@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""tests/fixtures/fake-claude — a stand-in for `claude -p --output-format stream-json` (no model, no $).
+
+The scenario is chosen by a `SCENARIO=<name>` line in the prompt on stdin, else in ./SPEC.md (a
+staged rollout sandbox; the executor runs it in a scrubbed env, so env vars cannot carry it). The
+event shapes mirror a real Claude Code 2.1.30x transcript. It records its own argv to ./argv.json so
+tests can prove the prompt never reaches argv.
+
+In a rollout sandbox it edits the staged repo per scenario (edit, noop, symlink, fifo, leak_token,
+honey: copy the honey file named by HONEY_DIR= in SPEC.md). With --json-schema it is the scorer: it
+returns criteria, or a grade (c1 full, others partial; a prompt holding SCENARIO=scorer_break gets a
+grade missing a required field).
+"""
+import json
+import os
+import re
+import sys
+import time
+
+prompt = sys.stdin.read()
+spec = open("SPEC.md").read() if os.path.isfile("SPEC.md") else \
+    open("evidence/e1/SPEC.md").read() if os.path.isfile("evidence/e1/SPEC.md") else ""
+scenario = (re.search(r"SCENARIO=(\w+)", prompt) or re.search(r"SCENARIO=(\w+)", spec) or [None, "ok"])[1]
+argv = sys.argv[1:]
+schema = json.loads(argv[argv.index("--json-schema") + 1]) if "--json-schema" in argv else None
+if schema and scenario not in ("scorer_break", "defect_none", "scorer_infra"):  # the scorer reads the arm's SPEC; arm scenarios are not its own
+    scenario = "ok"
+model = argv[argv.index("--model") + 1] if "--model" in argv else "unknown"
+tools = argv[argv.index("--tools") + 1].split(",") if "--tools" in argv else []
+if "Bash" not in tools and os.path.isdir("overlay") and not scenario.startswith("editor_"):  # editor sessions: arm scenarios are not theirs
+    scenario = "ok"
+json.dump(argv, open("argv.json", "w"))
+staged = sorted(d for d in os.listdir(".claude/skills") if os.path.isdir(os.path.join(".claude/skills", d))) \
+    if os.path.isdir(".claude/skills") else []
+always_on = "always_on=%s dup=%s" % (os.path.isfile("CLAUDE.md"), os.path.isfile(".claude/skills/CLAUDE.md"))
+
+init = {"type": "system", "subtype": "init", "model": model, "claude_code_version": "9.9.9-fake",
+        "tools": ["StructuredOutput"] if schema else list(tools), "mcp_servers": [], "skills": staged + ["debug", "simplify"],
+        "plugins": [{"name": "cc-plugin-sec-default", "path": "builtin"}], "permissionMode": "acceptEdits"}
+if scenario == "extra_skill":
+    init["skills"].append("user-skill-leaked")
+elif scenario == "plugin":
+    init["plugins"].append({"name": "mahoraga", "path": "/home/u/.claude/plugins/mahoraga"})
+elif scenario == "mcp":
+    init["mcp_servers"] = [{"name": "jira", "status": "connected"}]
+elif scenario == "tool_drift":
+    init["tools"] = list(tools) + ["WebSearch"]
+elif scenario == "model_drift":
+    init["model"] = "some-other-model"
+
+
+def emit(ev):
+    print(json.dumps(ev), flush=True)
+
+
+if scenario == "sleep":
+    time.sleep(30)
+if scenario == "noresult":
+    emit(init)
+    sys.exit(1)
+def edit_sandbox():
+    repo = sorted(d for d in os.listdir(".") if os.path.isdir(d) and not d.startswith("."))[0]
+    src = os.path.join(repo, "src")
+    if scenario in ("symlink", "planted_token"):
+        name = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "x") if scenario == "planted_token" else "innocent.txt"
+        os.symlink("/etc/hostname", os.path.join(repo, name))
+    elif scenario == "fifo":
+        os.mkfifo(os.path.join(repo, "pipe"))
+    elif scenario != "noop":
+        body = {"leak_token": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", ""),
+                "honey": "".join(open(p).read() for p in __import__("glob").glob(
+                    (re.search(r"HONEY_DIR=(\S+)", spec) or [None, "/nonexistent"])[1] + "/.honey-*"))}.get(scenario, "ok")
+        always_on = open("CLAUDE.md").read() if os.path.isfile("CLAUDE.md") else ""
+        if "## Process habits" in always_on:
+            body += " OVERLAY_SEEN"  # the planted positive: an arm that got an overlay does better
+        frag = re.search(r"fragment under (changes[\w-]*)/", always_on)
+        if frag:  # the gate-control convention: follow the overlay's release-notes rule
+            os.makedirs(os.path.join(repo, frag.group(1)), exist_ok=True)
+            open(os.path.join(repo, frag.group(1), "note-%s.md" % os.path.basename(os.getcwd())), "w").write("- a change\n")
+        with open(os.path.join(src, "Change.java"), "w") as fh:
+            fh.write("class Change {\n    String value() { return \"%s\"; }\n}\n" % body)
+
+
+def edit_overlay():
+    """Editor mode (tools without Bash, an overlay/ in cwd)."""
+    retry, task = "was rejected" in prompt, "Rules:" in prompt  # a retry must still carry the task
+    if scenario == "editor_plant" and not retry:  # make an invented identifier "exist" in the workspace copy
+        open("repo/src/Ghost.java", "w").write("public class Ghost { public void fetchGhostRecords() {} }\n")
+    shipped = "".join(open(p).read() for p in __import__("glob").glob("evidence/*/human.diff"))
+    dirs = re.findall(r"\+\+\+ \S*?/(changes[\w-]*)/", shipped)  # the convention a history-reading editor can learn
+    if dirs and scenario == "ok":
+        open("overlay/practice.md", "w").write("Read the existing service before adding one.\n")
+        open("overlay/conventions.md", "w").write("Every change adds a release-notes fragment under %s/.\n" % max(set(dirs), key=dirs.count))
+        open("notes.md", "w").write("Seen in the shipped changes.")
+        return
+    practice = {"editor_tell": "Run the eval first.\n" if not (retry and task) else "Read the existing service first.\n",
+                "editor_plant": "Call fetchGhostRecords before saving.\n" if not retry else "Read the existing service first.\n",
+                "editor_ghost": "Call fetchGhostRecords before saving.\n",
+                "editor_noop": open("overlay/practice.md").read()}.get(scenario, "Read the existing service before adding one.\n")
+    open("overlay/practice.md", "w").write(practice)
+    if scenario != "editor_noop":
+        open("overlay/conventions.md", "w").write("Controllers follow the existing request pattern.\n")
+    honey = "".join(open(p).read() for p in __import__("glob").glob(
+        (re.search(r"HONEY_DIR=(\S+)", spec) or [None, "/nonexistent"])[1] + "/.honey-*")) if scenario == "editor_honey" else ""
+    open("notes.md", "w").write("Traced to evidence/e1. " + honey)
+
+
+def structured():
+    if "criterion" in json.dumps(schema):
+        return {"criteria": [{"id": "c1", "criterion": "does the main thing", "source": "Implement the change.", "weight": 3},
+                             {"id": "c2", "criterion": "handles the edge case", "source": "The business wants it.", "weight": 1},
+                             {"id": "c3", "criterion": "copies the human design", "source": "a field the human picked", "weight": 2}]}
+    ids = re.findall(r'"id": "(\w+)"', prompt.split("===== SPEC =====")[0])
+    seen = "OVERLAY_SEEN" in prompt
+    cand = prompt.split("===== CANDIDATE DIFF =====")[-1]
+    frags = set(re.findall(r"\+\+\+ \S*?/(changes[\w-]*)/", cand))
+    def status(i):
+        text = (re.search(r'"id": "%s",\s*"criterion": "([^"]*)"' % i, prompt) or [None, ""])[1]
+        m = re.search(r"fragment (under|outside) (changes[\w-]*)/", text)
+        if m and m.group(1) == "under":
+            return "full" if m.group(2) in frags else "none"
+        if m:
+            return "full" if not (frags - {m.group(2)}) else "none"
+        return "full" if i == "c1" or seen else "partial"
+    out = {"criteria": [{"id": i, "status": status(i), "evidence": "+ok"} for i in ids],
+           "hallucination": {"present": False, "note": ""}, "overeng": {"present": False, "note": ""},
+           "lost_context": {"present": scenario == "defect_none", "note": "None of the new fields is read" if scenario == "defect_none" else ""},
+           "code_quality": {"overall": "equal", "rationale": "fake"}, "security": {"verdict": "none — parity/better"}}
+    if scenario == "scorer_break":
+        del out["lost_context"]
+    return out
+
+
+emit(init)
+if scenario == "hook":
+    emit({"type": "system", "subtype": "hook_response", "hook_event": "SessionStart"})
+if os.path.isdir("overlay") and "Bash" not in tools:
+    edit_overlay()
+elif spec and not schema:
+    edit_sandbox()
+emit({"type": "assistant", "message": {"content": [
+    {"type": "tool_use", "name": "Skill", "input": {"skill": s}}
+    for s in ([os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")] if scenario == "skill_token" else staged[:1])] + [
+    {"type": "text", "text": "leaking " + os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "") if scenario == "leak_token" else "done " + always_on}]}})
+result = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "terminal_reason": "completed",
+          "stop_reason": "end_turn", "total_cost_usd": 0.0123, "usage": {"input_tokens": 10, "output_tokens": 20},
+          "result": "done", "api_error_status": None}
+if scenario == "max_turns":
+    result.update(subtype="error_max_turns", is_error=True, terminal_reason="max_turns")
+elif scenario == "api_error":
+    result.update(subtype="error_during_execution", is_error=True, api_error_status=529, terminal_reason="api_error")
+elif scenario == "auth":
+    result.update(is_error=True, result="Not logged in · Please run /login", total_cost_usd=0)
+elif scenario == "missing_cost":
+    del result["total_cost_usd"]
+elif scenario == "editor_fail" or (scenario == "scorer_infra" and schema and "criterion" not in json.dumps(schema)):
+    result.update(subtype="error_during_execution", is_error=True, api_error_status=529, terminal_reason="api_error")
+if schema:
+    result["structured_output"] = structured()
+emit(result)

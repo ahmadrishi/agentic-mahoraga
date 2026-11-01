@@ -1,0 +1,261 @@
+# Agentic Mahoraga — CI. Runs the leak gate, the legibility budget (deps allowlist, LOC budget,
+# complexity ceiling), the zero-residue decontamination test, the adapter security-review gate,
+# and cheap syntax checks (bash -n, py_compile). All gates are stdlib/POSIX-only — no third-party
+# install step — matching the core's committed dependency allowlist. The leak gate runs FIRST: no
+# company data ever gets past CI.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 1. Company-data leak gate — this blocks the push.
+      # The generic patterns ship in the script. The organisation-specific ones are a private list kept in
+      # the LEAK_SCAN_EXTRA secret (empty on forks, which then run the generic layer and say so).
+      - name: Leak scan (company-data denylist)
+        env:
+          LEAK_SCAN_EXTRA: ${{ secrets.LEAK_SCAN_EXTRA }}
+          # Set the repository variable LEAK_SCAN_REQUIRE_EXTRA=1 where the secret exists: a deleted or
+          # emptied secret then fails this step instead of quietly running the generic layer.
+          LEAK_SCAN_REQUIRE_EXTRA: ${{ vars.LEAK_SCAN_REQUIRE_EXTRA }}
+        run: bash scripts/leak-scan.sh
+
+      # 2. Legibility budget.
+      - name: Dependency allowlist
+        run: python3 scripts/check-deps-allowlist.py
+
+      - name: LOC budget (core)
+        run: python3 scripts/loc-budget.py
+
+      # Non-blocking: surfaces complexity debt in core/lib without blocking the push. Drop
+      # continue-on-error once core/lib main()s are split.
+      - name: Complexity ceiling (core/lib)
+        continue-on-error: true
+        run: python3 scripts/complexity-ceiling.py
+
+      # core/loop is held to a blocking ceiling (no legacy debt to work off).
+      - name: Complexity ceiling (core/loop — blocking)
+        run: python3 scripts/complexity-ceiling.py core/loop
+
+      # 2b. Skill-schema lint — validate every skills/**/SKILL.md against the emitted-SKILL.md
+      # schema (core/schema/SKILL.schema.md): name shape/uniqueness, description length, a valid
+      # mahoraga.kind, and the body size budget. Stdlib-only (PyYAML only if present), so it needs no
+      # install step and belongs with the other blocking legibility gates. BLOCKS the push on any hard
+      # violation. Runs over the repo's own skills (guard=kind guard, adapt/prove=kind meta).
+      - name: Skill-schema lint (skills/**/SKILL.md)
+        run: python3 scripts/skill-schema-lint.py
+
+      # 3. Decontamination acceptance test.
+      - name: Zero-residue sandbox test
+        run: bash scripts/zero-residue-sandbox-test.sh
+
+      # 3b. Adapter security-review gate. Adapters are the community contribution surface, so
+      # every core/adapters/**/*.sh is scanned for supply-chain red flags — raw network to a LITERAL
+      # host (git/gh allowed; hosts must come from config), `eval` of untrusted input, and
+      # secret-exfiltration shapes. Clean adapters (git + gh + config reads) PASS; a red flag BLOCKS
+      # the push with the offending file:line. Stdlib/coreutils only (grep/awk) — no install step —
+      # so it belongs with the other blocking legibility/security gates.
+      - name: Adapter security review (core/adapters)
+        run: bash scripts/adapter-security-check.sh
+
+      # 4. Cheap syntax checks over everything shipped.
+      - name: bash -n (shell scripts)
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' f; do
+            found=$((found+1))
+            echo "bash -n $f"
+            bash -n "$f"
+          done < <(find . -type f -name '*.sh' \
+                     -not -path './.git/*' -not -path '*/node_modules/*' -print0)
+          echo "bash -n: checked $found shell script(s)."
+
+      - name: py_compile (python)
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' f; do
+            found=$((found+1))
+            echo "py_compile $f"
+            python3 -m py_compile "$f"
+          done < <(find . -type f -name '*.py' \
+                     -not -path './.git/*' -not -path '*/__pycache__/*' \
+                     -not -path '*/.venv/*' -not -path '*/venv/*' -print0)
+          echo "py_compile: checked $found python file(s)."
+
+  # End-to-end + decontamination + two-arm PROVE tests — run AFTER the gates (needs: gates), so the
+  # leak scan and the other blocking gates pass FIRST. These execute the real scripts
+  # (leak_gate.sh, adapters.sh, prepare_task.sh, stage_sandbox.sh, extract_ai_diff.sh, cutoff_label.py,
+  # aggregate_scores.py, build_report.py) on the committed example fixtures. The loop below runs EVERY
+  # tests/*.sh except the ones named below (which run as their own steps), so it already includes:
+  #   * e2e_ts_app_test.sh                 — single-arm mechanical pipeline on examples/ts-app
+  #   * leak_gate_snake_test.sh            — language-aware (snake_case) decontamination
+  #   * prove_ablation_test.sh             — TWO-ARM ablation prove on examples/py-service
+  #                                          (harness vs empty-skills baseline; asserts ablation_delta>0,
+  #                                          the report's ablation panel + cutoff/decontam chips, and the
+  #                                          cutoff_label private/public outcomes)
+  #   * prove_contamination_abort_test.sh  — a leaky SOURCE skill ABORTS staging (fail-closed)
+  # They need only git + python3 + PyYAML (the one allowed runtime dep); Node/tsc are OPTIONAL — the
+  # e2e verify step self-guards and documents a SKIP when tsc is absent, so no TypeScript toolchain is
+  # installed and the run stays hermetic (no network). The node-requiring steps — the mapping-forge
+  # held-out test and the quickstart end-to-end (init -> forge -> GUARD -> two-arm prove) — are
+  # excluded from that loop and run as their own steps below, where node is available. The GUARD-pack
+  # tests and the cross-agent install, gitea adapter and adapter security tests are also excluded from
+  # the loop and run as their own named steps below, for legibility (they need no node).
+  tests:
+    runs-on: ubuntu-latest
+    needs: gates
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML (the one allowed python runtime dep — see deps-allowlist.txt)
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Run tests/*.sh (e2e pipeline + decontamination + two-arm prove + contamination abort)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          for t in tests/*.sh; do
+            # The mapping-forge held-out test, the quickstart test, and the GUARD-pack tests run
+            # as their own steps below (mapping-forge + quickstart need node; the guard-pack tests are
+            # named for legibility).
+            case "$t" in tests/mapping_forge_python_test.sh|tests/fail_loud_test.sh|tests/quickstart_test.sh|tests/guard_hooks_test.sh|tests/plugin_validate_test.sh|tests/cross_agent_install_test.sh|tests/gitea_adapter_test.sh|tests/adapter_security_check_test.sh|tests/oracle_floor_test.sh|tests/loop_isolation_test.sh) continue ;; esac
+            found=$((found+1))
+            echo "::group::bash $t"
+            bash "$t"
+            echo "::endgroup::"
+          done
+          if [ "$found" -eq 0 ]; then echo "no tests/*.sh found" >&2; exit 1; fi
+          echo "tests: ran $found script(s)."
+
+      # The behavioural-oracle floor, end to end (core/lib/oracle_scan.py, run_oracle and the
+      # SMOKE-VERIFIED verdict rung, N-arm arms + arm_deltas, and the report that renders every arm).
+      # On a hermetic temp fixture (one real-assertion test + one stub) it
+      # asserts: (1) oracle_scan --self-test passes; (2) the scan emits the real oracle's expected
+      # literal + test-file:line at tier WITNESSED, classifies the stub as STUB (NOT counted), and
+      # prints the counted real/total/files denominator; (3) determinism; (4) verify run_oracle is
+      # honest — a green oracle -> SMOKE-VERIFIED, a not-runnable one -> UNVERIFIED (no fake pass);
+      # (5) a THREE-arm aggregate (baseline + harness + mapping+oracle) yields 3 arms + arm_deltas and
+      # a report rendering all three; (6) the prove_ablation_test still passes. Needs only python3 +
+      # PyYAML (set up above) + git + coreutils — NO node — so it runs here, excluded from the loop
+      # above (it delegates to prove_ablation_test, which the loop already runs).
+      - name: Behavioural-oracle floor (scan + SMOKE verdict + three-arm ablation)
+        run: bash tests/oracle_floor_test.sh
+
+      # Cross-language mapping-forge held-out test (mapping-kind conformance lint + cross-language
+      # grounding scan). Runs AFTER the existing tests. Needs python3 (mapping_scan.py) + node
+      # (conformance-lint.mjs) — python3 is set up above and node is pre-installed on ubuntu-latest.
+      - name: Mapping-forge held-out test
+        run: bash tests/mapping_forge_python_test.sh
+
+      # Fail-loud grounding floor: mapping_scan / oracle_scan exit 3 (UNSUPPORTED) on a language they
+      # cannot read instead of mapping a minority language or reporting 0/0/0; the generic grep runs
+      # only behind --allow-generic and never emits keywords as names; and conformance-lint resolves
+      # every path:line against the repo (an invented file, a line past EOF, or a name not on its line
+      # fails). Needs python3 + node (pre-installed on ubuntu-latest), so it runs as its own step.
+      - name: Fail-loud scanners + evidence-resolving lint
+        run: bash tests/fail_loud_test.sh
+
+      # The clone-and-go quickstart, proven mechanically. On a THROWAWAY COPY of the repo
+      # (live checkout untouched) it runs the mechanical quickstart end to end — (1) `mahoraga init` ->
+      # PROJECT.yaml + CLAUDE.md; (2) forge a <project>-mapping skill via mapping_scan.py + scaffold ->
+      # `node scripts/conformance-lint.mjs` PASS; (3) assert the universal GUARD pack ships; (4) run the
+      # canonical mechanical two-arm prove (delegates to prove_ablation_test.sh, reused not duplicated)
+      # -> an ablated report with ablation_delta + a per-unit cutoff_label + decontam_confidence. Needs
+      # python3 + PyYAML (set up above) + node (pre-installed on ubuntu-latest) + git; fully hermetic.
+      - name: Quickstart end-to-end (init -> mapping forge -> GUARD -> two-arm prove)
+        run: bash tests/quickstart_test.sh
+
+      # GUARD-pack tests (they use the hooks, hooks.json and the plugin manifest).
+      # guard_hooks_test.sh pipes crafted stdin JSON straight at the hook SCRIPTS: small-diff-gate.sh
+      # (PreToolUse) must exit 2 on an over-cap change in BLOCK mode and exit 0 on a small/new-file/
+      # malformed/WARN-mode change; verify-after-edit.sh (PostToolUse) SURFACES a per-file syntax
+      # verdict on stderr but ALWAYS exits 0 (PostToolUse cannot block — honest per the docs). It needs
+      # only bash + python3 (no jq — JSON is built with python3 stdlib), so it is fully hermetic here.
+      - name: Guard hooks (small-diff-gate block/warn/fail-open + verify-after-edit surfaces)
+        run: bash tests/guard_hooks_test.sh
+
+      # plugin_validate_test.sh asserts `claude plugin validate --strict` exits 0 for the marketplace and
+      # the plugin manifest, and (always, CLI or not) that every skill family is listed in plugin.json
+      # and commands/engine skills use ${CLAUDE_PLUGIN_ROOT} paths. ubuntu-latest has no claude CLI, so
+      # a PINNED one is installed here (validation is local — no auth). Bump the pin deliberately; it is
+      # supply-chain surface. The explicit install.cjs run covers npm versions that block postinstall
+      # scripts. MAHORAGA_REQUIRE_CLAUDE_CLI=1 turns a missing CLI into a failure, not a quiet downgrade.
+      - name: Install claude CLI (pinned — for the real plugin --strict gate)
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.290
+          node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs"
+          claude --version
+
+      - name: Plugin validate (claude plugin validate --strict + install-resolution checks)
+        env:
+          MAHORAGA_REQUIRE_CLAUDE_CLI: "1"
+        run: bash tests/plugin_validate_test.sh
+
+      # Cross-agent install, gitea adapter and adapter security tests. Each needs only git + python3
+      # (+ PyYAML, set up above) + bash/coreutils — NO node — so they are hermetic here.
+
+      # cross_agent_install_test.sh: `mahoraga install --target <tmp> --agent cursor` copies ONLY the
+      # GUARD pack (not the adapt/prove engine skills) and prints the hooks-don't-port caveat; --dry-run
+      # writes nothing. Pure-sh install path; bash + coreutils only.
+      - name: Cross-agent install (GUARD pack only + hooks-don't-port caveat + dry-run inert)
+        run: bash tests/cross_agent_install_test.sh
+
+      # gitea_adapter_test.sh: reuses examples/ts-app/setup-fixture.sh and drives gitea.sh (pure-git
+      # tracker) via adapters.sh + directly — list_units surfaces the unit, fork_point is the
+      # merge-base parent, reference_diff is the shipped change. Mirrors the github_pr git-host model.
+      - name: Gitea adapter (pure-git list_units / fork_point / reference_diff)
+        run: bash tests/gitea_adapter_test.sh
+
+      # adapter_security_check_test.sh: the REAL adapters PASS scripts/adapter-security-check.sh, and a
+      # SEEDED bad adapter (curl to a literal host with a secret) FAILS (non-zero + names the file).
+      - name: Adapter security check (real adapters PASS; seeded bad adapter FAILS + named)
+        run: bash tests/adapter_security_check_test.sh
+
+  # The improve loop's arm boundary, in the REAL container config (docker is on ubuntu-latest).
+  # Free: the model-free escape agent replaces the claude binary, so no model and no credential runs.
+  # MAHORAGA_REQUIRE_DOCKER=1 makes a skip a failure: this job exists to prove the boundary holds.
+  loop-isolation:
+    runs-on: ubuntu-latest
+    needs: gates
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pull the arm + proxy images
+        run: docker pull -q ubuntu:24.04 && docker pull -q python:3.12-alpine
+
+      - name: Arm boundary (escape agent 0/4, symlink caught, negative control sees escapes)
+        env:
+          MAHORAGA_REQUIRE_DOCKER: "1"
+        run: bash tests/loop_isolation_test.sh

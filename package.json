@@ -1,0 +1,21 @@
+{
+  "name": "agentic-mahoraga",
+  "version": "0.1.0",
+  "description": "Forges file:line-grounded skills from your code, then replays your own shipped tickets blind — against a bare-model baseline — to measure whether they help. This package exposes the `mahoraga` CLI (init + install); it is not yet published to npm.",
+  "bin": {
+    "mahoraga": "cli/mahoraga"
+  },
+  "files": [
+    "cli/",
+    "core/",
+    "skills/",
+    "commands/",
+    "hooks/",
+    "docs/",
+    "branding.yaml",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": "https://github.com/ahmadrishi/agentic-mahoraga",
+  "license": "MIT"
+}

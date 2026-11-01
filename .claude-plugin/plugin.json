@@ -1,0 +1,16 @@
+{
+  "name": "mahoraga",
+  "version": "0.1.0",
+  "description": "Forges file:line-grounded skills from your code, then replays your own shipped tickets blind — against a bare-model baseline — to measure whether they help. Ships the GUARD pack (8 skills + 2 Claude Code hooks), the adapt/prove engine, and `mahoraga loop`, a measured improve loop that keeps an edit only if it helps on later, held-out tickets (Linux + Docker).",
+  "author": {
+    "name": "Agentic Mahoraga contributors"
+  },
+  "homepage": "https://github.com/ahmadrishi/agentic-mahoraga",
+  "repository": "https://github.com/ahmadrishi/agentic-mahoraga",
+  "license": "MIT",
+  "skills": [
+    "./skills/guard/",
+    "./skills/prove/",
+    "./skills/adapt/"
+  ]
+}

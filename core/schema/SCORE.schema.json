@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agentic-mahoraga/score.schema.json",
+  "title": "Per-unit eval score",
+  "description": "The reconciling verifier writes one of these per unit. These are AGENT-WEAKNESS metrics under the dual-input probe: the implementer was given BOTH the spec AND the business requirement, so a miss is an agent weakness, not a spec-completeness gap. Code quality is graded vs the human diff as a REFERENCE (better/equal/worse), NEVER as a match target — there is deliberately no 'human-match %'. Consumed by core/lib/aggregate_scores.py and core/lib/build_report.py.",
+  "type": "object",
+  "required": ["id", "business_req_pct", "code_quality", "security", "compile"],
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "string", "description": "Unit key — a ticket key, PR number, or tagged commit, e.g. BILL-1234" },
+    "title": { "type": "string", "description": "Short unit title" },
+    "complexity": { "type": "string", "enum": ["small", "medium", "large"] },
+    "compile": {
+      "type": "string",
+      "description": "Real build/type-check verdict grepped from the log (never the wrapper exit code), or n/a for a repo with no build_cmd and no typecheck_cmd.",
+      "pattern": "^(BUILD_SUCCESS|BUILD_FAILURE.*|n/a|N/A)$"
+    },
+    "business_req_pct": {
+      "type": "integer", "minimum": 0, "maximum": 100,
+      "description": "Weighted % of the atomic acceptance criteria achieved, graded against the REAL business ask (not spec-line coverage). Headline number. aggregate_scores.py RECOMPUTES it from business_criteria when they are present (full=1, partial=0.5, none=0, weight-normalised) and uses the recomputed value; invalid criteria make it null ('not measured') in scores.json, never 0."
+    },
+    "business_req_source": {
+      "type": "string", "enum": ["criteria", "grader", "invalid-criteria", "missing"],
+      "description": "Set by aggregate_scores.py (score_hygiene.recompute), not by the grader: where business_req_pct came from."
+    },
+    "business_req_pct_reported": {
+      "type": ["integer", "null"],
+      "description": "Set by aggregate_scores.py when the grader's own business_req_pct disagreed with the value recomputed from business_criteria (the recomputed value wins)."
+    },
+    "business_criteria": {
+      "type": "array",
+      "description": "The business requirement + spec decomposed into weighted atomic criteria, each graded with file:line evidence.",
+      "items": {
+        "type": "object",
+        "required": ["criterion", "status"],
+        "properties": {
+          "criterion": { "type": "string" },
+          "weight": { "type": "number", "description": "Relative weight; the pct is the weighted roll-up." },
+          "status": { "type": "string", "enum": ["full", "partial", "none"] },
+          "evidence": { "type": "string", "description": "Confirmable file:line grounding the verdict." }
+        }
+      }
+    },
+    "code_quality": {
+      "type": "object",
+      "description": "Each axis is better|equal|worse vs the human REFERENCE — a different-but-equal-or-better solution is not a defect. Do NOT emit a match-percentage.",
+      "required": ["overall"],
+      "properties": {
+        "reuse": { "type": "string", "enum": ["better", "equal", "worse"] },
+        "reuse_note": { "type": "string" },
+        "architecture": { "type": "string", "enum": ["better", "equal", "worse"] },
+        "architecture_note": { "type": "string" },
+        "patterns": { "type": "string", "enum": ["better", "equal", "worse"] },
+        "patterns_note": { "type": "string" },
+        "maintainability": { "type": "string", "enum": ["better", "equal", "worse"] },
+        "maintainability_note": { "type": "string" },
+        "overall": { "type": "string", "enum": ["better", "equal", "worse", "mixed"] },
+        "rationale": { "type": "string" }
+      }
+    },
+    "security": {
+      "type": "object",
+      "description": "Only net-new REACHABLE threat vs the human diff baseline. A theoretical/unreachable issue is not a finding.",
+      "required": ["verdict"],
+      "properties": {
+        "verdict": { "type": "string", "description": "'none — parity/better' or 'net-new: <description>'" },
+        "severity": { "type": "string", "enum": ["none", "low", "med", "high"] },
+        "reachable": { "type": "boolean" },
+        "evidence": { "type": "string", "description": "file:line for a net-new finding." }
+      }
+    },
+    "hallucination": { "type": "string", "description": "'none' or a description of an invented symbol/API (the compile-gate is the concrete detector)." },
+    "overeng": { "type": "string", "description": "'none' or scope built that the ask did not need." },
+    "lost_context": { "type": "string", "description": "'none' or: locally-correct output the consumer never reads, or a value the producer never emits. The signature weakness this eval exists to catch." },
+    "spec_fidelity": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "caught_spec_error": { "type": "string", "description": "Positive signal: the agent flagged a spec/business-req problem instead of blindly following it." },
+    "divergence": { "type": "string", "description": "How the AI approach differs from the human reference (neutral)." },
+    "value_add": { "type": "string" },
+    "eval_note": { "type": "string" },
+    "verdict": { "type": "string", "description": "The reconciled one-line verdict shown on the scoreboard." },
+    "documented_only": { "type": "boolean", "description": "true = attempted but not scored (e.g. infra-stalled, or an anti-over-engineering no-op); rendered in a separate 'documented, not scored' section." },
+    "arm": {
+      "type": "string",
+      "description": "Which ablation arm produced this score. ABSENT defaults to 'harness' (back-compat). ANY string is a distinct arm (N-arm): the canonical ones are 'harness' (the sandbox staged with the project's full skills — mapping + GUARD + …) and 'baseline' (the SAME fork-point / SPEC / business requirement with skills stripped to EMPTY and no GUARD pack); a run may add further arms, e.g. 'mapping+oracle' via score.mapping+oracle.json. aggregate_scores.py globs <UNIT>/score*.json, groups by this raw field into aggregate.arms, and emits ablation_delta (harness − baseline) plus arm_deltas (each non-baseline arm vs baseline)."
+    },
+    "scorer_model": { "type": "string", "description": "The scorer's model id (e.g. the reconciling verifier's model)." },
+    "scorer_family": { "type": "string", "description": "The scorer's model family (e.g. claude, gemini, gpt, glm). aggregate_scores.py flags SAME-FAMILY SCORING when it matches implementer_family or improver_family (self-preference risk)." },
+    "implementer_model": { "type": "string", "description": "The blind implementer's model id." },
+    "implementer_family": { "type": "string", "description": "The blind implementer's model family." },
+    "improver_family": { "type": "string", "description": "For a retest: the model family that proposed the skill edits being measured." },
+    "blind_label": { "type": "string", "description": "Set by score_hygiene.py unblind: the opaque label (A, B, …) this arm was scored under; the scorer never saw the arm name." },
+    "scorer": {
+      "type": "string",
+      "description": "Who produced this score. 'adversarial-review-loop' = the reviewer → red-team → reconciling-verifier protocol; 'stub' = fixture constants (tests/demos — not a measurement); any other string is shown as written. ABSENT is reported as an unrecorded scorer. aggregate_scores.py builds the report headline's provenance from this field and prefixes 'STUB RUN' whenever any score is a stub."
+    },
+    "oracle": {
+      "type": "object",
+      "description": "OPTIONAL behavioural-oracle grounding for this unit: a single mined oracle that was witnessed or run for it. A FLOOR — witnessed literal + its site only; NEVER an inferred 'what the test proves'. Emitted by core/lib/oracle_scan.py, promoted to tier RUN by the verify adapter when the oracle actually executed. All fields optional; back-compatible.",
+      "additionalProperties": true,
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["RUN", "WITNESSED", "STUB", "UNVERIFIED"],
+          "description": "Strength-of-evidence tier: RUN = executed and passed just now; WITNESSED = a concrete expected literal read at a file:line (asserted, not run here); STUB = a test with no real assertion (counted, never grounding); UNVERIFIED = referenced but no oracle found."
+        },
+        "expected": {
+          "type": "string",
+          "description": "The asserted literal/behaviour, or '—' for a stub."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "test-file:line for a WITNESSED/RUN oracle (matches ^\\S+:\\d+$)."
+        }
+      }
+    },
+    "cutoff_label": {
+      "type": "string",
+      "enum": ["cutoff-clean", "cutoff-unverified"],
+      "description": "Pretraining-cutoff label, computed by core/lib/cutoff_label.py from the unit's merged_at + the project's decontamination.cutoff_policy (repo_visibility / model_cutoff). 'cutoff-clean' = the unit could NOT be in public pretraining (private repo, or merged after the model cutoff); 'cutoff-unverified' = it might be. A HEADLINE number must come from cutoff-clean units."
+    },
+    "cutoff_reason": {
+      "type": "string",
+      "description": "Human-readable justification for cutoff_label, e.g. 'private repo — not in public pretraining' or 'merged 2025-06-01 after model cutoff 2025-01-01'."
+    },
+    "decontam_confidence": {
+      "type": "string",
+      "enum": ["auto+curated", "auto-only", "curated-only", "nothing-checked", "hand-mitigated"],
+      "description": "How thoroughly this unit was decontaminated: 'auto+curated' = the automated leak gate AND a curated answer-token list both ran; 'auto-only' = only the automated gate; 'curated-only' = only a curated token list; 'nothing-checked' = neither; 'hand-mitigated' = a known overlap was manually mitigated. Surfaced as a per-unit chip in the report."
+    },
+    "human_stat": { "type": "string", "description": "e.g. '5 files changed, 469 insertions(+)'" },
+    "ai_stat": { "type": "string" },
+    "artifacts": {
+      "type": "object",
+      "description": "Relative-to-unit-dir (or absolute) paths to the on-disk evidence.",
+      "properties": {
+        "repo": { "type": "string" },
+        "human_diff": { "type": "string" },
+        "ai_diff": { "type": "string" },
+        "reviewer": { "type": "string" },
+        "redteam": { "type": "string" },
+        "verifier": { "type": "string" },
+        "compile_log": { "type": "string" }
+      }
+    }
+  }
+}

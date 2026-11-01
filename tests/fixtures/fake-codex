@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# tests/fixtures/fake-codex — a stand-in for `codex exec --json ... -o /out/last.json -` (no model, no $).
+# Runs INSIDE the scorer container. The scenario is a `SCENARIO=<name>` line in the prompt on stdin:
+#   ok     write a schema-shaped grade to /out/last.json and print turn events
+#   leak   also print the API key it was given (the scan must catch and redact it)
+#   sleep  hang (the caller's timeout must kill the container)
+# Every scenario first tries to write into /view (mounted read-only) and records whether it could.
+prompt=$(cat)
+scenario=$(printf '%s' "$prompt" | sed -n 's/.*SCENARIO=\([a-z]*\).*/\1/p')
+if (printf x > /view/written-by-scorer) 2>/dev/null; then view_rw=true; else view_rw=false; fi
+[ "$scenario" = sleep ] && sleep 120
+echo '{"type":"thread.started","thread_id":"fake"}'
+[ "$scenario" = leak ] && printf '{"type":"item.completed","item":{"type":"agent_message","text":"key=%s"}}\n' "$CODEX_API_KEY"
+printf '{"criteria":[{"id":"c1","status":"full"}],"view_writable":%s}' "$view_rw" > /out/last.json
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}'

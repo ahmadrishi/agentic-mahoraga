@@ -1,0 +1,58 @@
+# examples/ts-app/PROJECT.yaml
+# A RUNNABLE fixture project for Agentic Mahoraga (see README.md and core/schema/PROJECT.schema.yaml).
+#
+# Unlike a bare skeleton, the mechanical loop actually runs on this: `setup-fixture.sh` builds a real
+# git repo whose last commit is the unit of work, and the `github-pr` tracker adapter's pure-git
+# fallback discovers it (no `gh`, no network). For a run, set `project.root` to the `root=` line that
+# `setup-fixture.sh` prints (its parent dir) — or point MAHORAGA_REPO_DIR at the `repo=` line, which
+# the github-pr adapter honours directly. The values below are only parseable defaults.
+
+project:
+  id:   "ts-app"
+  name: "ts-app (TypeScript fixture)"
+  root: "/tmp/ts-app-fixture"          # OVERRIDE per run — see setup-fixture.sh `root=`
+
+repos:
+  - name:     "ts-app"                 # dir under project.root AND the sandbox subdir name
+    language: "typescript"             # selects the token heuristic + diff-exclude set
+    verify:
+      # NOTE: `npx tsc` runs a DECOY squatter package, not the compiler — always name the package.
+      typecheck_cmd: "npx --yes --package=typescript tsc --noEmit -p tsconfig.json"   # verdict = exit code
+      # no test_cmd: a pass here is BUILD-VERIFIED, never behavior-verified (honesty rule).
+
+tracker:
+  adapter: github-pr                   # unit of work = the last merged PR / commit on base_branch
+  config:
+    # repo: "example/ts-app"           # a real run sets "owner/name" (basename locates the checkout).
+    repo:           ""                 # LEFT EMPTY so the adapter ALWAYS takes the pure-git fallback,
+                                       #   even on a runner where `gh` is installed (else it would try
+                                       #   the GitHub API and fail). The checkout is then found via
+                                       #   project.root/<repo> or MAHORAGA_REPO_DIR (see setup-fixture.sh).
+    base_branch:    "main"
+    merge_strategy: "squash"           # pure-git fallback lists the last N non-merge commits
+    labels_exclude: ["automated", "dependabot"]
+
+spec:
+  adapter: markdown                    # the design note is a file in the repo
+  config:
+    glob: "SPEC.md"                    # searched under project.root and project.root/<repo>
+
+vcs:
+  adapter: git
+  base_branch: "main"
+
+skills:
+  source_dir: "examples/ts-app/.claude/skills"   # resolvable from the repo root; the fixture also
+                                                  # stages a copy next to the checkout (skills= line)
+  derived_skills: []
+
+selection:
+  n: 5
+  complexity_spread: false
+  require_multi_repo: false            # single-repo — the cross-repo lost-context probe is N/A
+
+decontamination:
+  exclusion: []                        # already-evaluated units; appended each run
+  cutoff_policy:
+    require_post_cutoff_for_headline: true
+    repo_visibility: public            # a public example => any headline would be "cutoff-unverified"

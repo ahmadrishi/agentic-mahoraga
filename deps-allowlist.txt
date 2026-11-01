@@ -1,0 +1,19 @@
+# deps-allowlist.txt — the committed dependency allowlist for the module-agnostic core.
+#
+# THE RULE: adding a runtime dependency fails CI until it is added HERE in the same change, with a
+# justification. This is the "legibility budget" for dependencies — a newcomer can see, in one file,
+# every third-party thing the core is allowed to import. scripts/check-deps-allowlist.py enforces it.
+#
+# FORMAT: sectioned by ecosystem. In each section, one allowed *import name* per line (the name that
+# appears in the source, not necessarily the PyPI/npm package name). '#' starts a comment. The
+# Python standard library and first-party (in-repo, relative) modules are always allowed and are
+# NOT listed here — only third-party imports need an entry.
+
+[python]
+# Only third-party Python dependency permitted in the core is PyYAML.
+# PyPI package: PyYAML   ·   import name: yaml
+yaml
+
+[node]
+# None. The core requires no third-party Node packages. (Skill scripts that ship under skills/ use
+# only Node built-ins; the CLI's own packaging deps live with the CLI, not the core.)

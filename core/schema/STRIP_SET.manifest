@@ -1,0 +1,27 @@
+# STRIP_SET.manifest — Mahoraga's OWN skills that describe the eval itself and MUST be
+# stripped from every blind sandbox, so an implementer cannot tell it is being tested and cannot
+# read the methodology as an answer key.
+#
+# WHY A MANIFEST, NOT A HARD-CODED LIST: a list hard-coded in
+# stage_sandbox.sh would silently leave a renamed or added skill in the sandbox (a decontamination
+# TELL). The staging code reads THIS file, and CI's zero-residue sandbox test asserts none of these
+# directories survive staging. Add every new Mahoraga-own skill dir here.
+#
+# One skill directory name per line. Comments start with '#'. Matched by basename anywhere under
+# the staged .claude/skills tree.
+
+# --- prove/improve engine (skills/prove) ---
+blind-eval
+adversarial-review-loop
+sandbox-isolation
+skill-improvement-loop
+
+# --- adapt engine (skills/adapt) ---
+codebase-mapping-forge
+spec-style-forge
+skill-editor
+conformance-lint
+
+# NOTE: the GUARD behavioral pack (skills/guard/*) is NOT stripped — those are stack-agnostic
+# disciplines the implementer is meant to have, not descriptions of the eval. Only the meta-skills
+# that describe the adapt/prove operation itself are stripped.

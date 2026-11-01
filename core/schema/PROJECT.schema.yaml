@@ -1,0 +1,103 @@
+# PROJECT.yaml — schema (documented) for Agentic Mahoraga.
+# One file fully describes a project so the module-agnostic core can run the whole
+# adapt -> prove -> improve operation on it. Copy this, fill every REQUIRED key.
+# `mahoraga init` drafts one of these by discovery; a human confirms it (the one setup gate).
+#
+# DESIGN: everything vendor-specific lives behind an ADAPTER (see docs/ADAPTER-CONTRACT.md).
+# The core never branches on a vendor — it calls the adapter named here. Adapters take every
+# hostname / key / project from THIS file; there are no literal vendor hostnames in core code.
+#
+# Types: (str) (int) (bool) (path) (list) (enum:a|b). {{key}} = interpolated at runtime.
+# The ONLY places project-specific *answers* may live: `decontamination.answer_tokens` and `decontamination.exclusion`.
+
+project:
+  id:            (str, REQUIRED)   # short slug, names the run dir + state file
+  name:          (str, REQUIRED)   # human name shown in reports
+  root:          (path, REQUIRED)  # absolute dir that contains the repos (full local checkouts)
+
+# ---- repos the project spans ----
+repos:                             # (list, REQUIRED, >=1)
+  - name:        (str, REQUIRED)   # dir name under project.root AND the sandbox subdir name
+    language:    (str, REQUIRED)   # e.g. "java","typescript","python","go" — selects the language-aware
+                                   # decontamination token heuristic and diff-exclude set
+    verify:                        # per-repo verification — replaces the old single global build cmd
+      build_cmd:   (str, optional) # non-interactive, test-skipping build; omit if the repo does not compile
+      typecheck_cmd:(str, optional)# e.g. "npx tsc --noEmit -p tsconfig.json" — verdict is the exit code
+      test_cmd:    (str, optional) # OPTIONAL. If absent, the repo is BUILD-VERIFIED, not behavior-verified.
+                                   # NOTE: real test execution in the blind sandbox needs provisioning
+                                   # (deps/network/fixtures) — see docs and treat as a follow-on, not a promise.
+      success_marker:(str, optional)# log line proving build success (grepped, not the wrapper exit code);
+                                   # REQUIRED if build_cmd is set and produces no reliable exit code
+
+# ---- ticket / work-unit source (adapter) ----
+# The unit of work is a MERGED PR, a ticket-with-branch, or a tagged commit — NOT hard-coded to a branch.
+tracker:
+  adapter:       (enum:github-pr|jira|linear|gitea|file|none, REQUIRED)
+  config:                          # adapter-specific; see docs/ADAPTER-CONTRACT.md for each adapter's keys
+    # github-pr: { repo: "owner/name", base_branch: "main", merge_strategy: squash|merge, labels_exclude: [...] }
+    # jira:      { base_url, project_key, done_status, branch_is_key, branch_glob, commit_grep, labels_exclude }
+    # file:      { path: "units.csv" }   # columns: unit_id,fork_point,ref  — for any workflow the others miss
+    # none:      { base_branch: "main", n: 20, merge_strategy: squash }  # operate on merged PRs directly, no ticket metadata
+    {}
+
+# ---- spec / design-doc source (adapter) ----
+spec:
+  adapter:       (enum:markdown|issue-body|confluence|notion|gdocs|none, REQUIRED)
+  config:                          # markdown: {glob}; issue-body: {}; confluence/notion/gdocs: {base_url, locator}
+    {}                             # confluence/notion/gdocs ship TEXT-EXTRACT-ONLY (degraded); visual specs are out of scope
+  untranscribable:(list, optional) # spec formats that force task exclusion, e.g. ["figma","whiteboard-image"]
+
+# ---- version control (host-agnostic local git) ----
+vcs:
+  adapter:       (enum:git, default git)
+  base_branch:   (str, optional)   # for PR/merge-base fork-point resolution, e.g. "main"
+
+# ---- skills library under prove/improve ----
+skills:
+  source_dir:    (path, REQUIRED)  # the project's live .claude/skills, copied into every sandbox
+  index_file:    (str, optional)   # a discoverable index staged into the sandbox
+  derived_skills:(list, optional)  # skills tuned from prove tasks -> must have SKILL.sanitized.md before any blind run
+
+# ---- task selection & fairness ----
+selection:
+  n:                 (int, default 10)
+  lookback_days:     (int, default 120)
+  complexity_spread: (bool, default true)   # mix small/medium/large
+  require_multi_repo:(bool, default true)   # force some cross-repo tasks (lost-context probe)
+
+# ---- decontamination (the eval's integrity — see docs/DECONTAMINATION.md) ----
+decontamination:
+  # Curated answer tokens the sandbox skills must NOT contain (supplements the language-aware
+  # auto-derivation from the human diff). Especially symbols that already existed at the fork-point.
+  answer_tokens: (map unit_id -> list<str>, optional)
+  exclusion:     (list, REQUIRED, may be empty)   # already-evaluated units; never re-select; appended each run
+  # Pretraining-cutoff policy: protects the "decontaminated" claim.
+  cutoff_policy:
+    require_post_cutoff_for_headline: (bool, default true)  # a HEADLINE number must come from private/post-cutoff units
+    model_cutoff:  (str, optional)   # ISO date; units merged after this are "cutoff-clean"
+    repo_visibility:(enum:private|public|unknown, default unknown)  # public repos -> eval labelled "cutoff-unverified"
+
+# ---- output layout (OS-portable; resumable) ----
+output:
+  run_dir:      (str, default "eval-run/{{project.id}}-runs/{{run_id}}")
+  state_file:   (str, default "eval-run/{{project.id}}-runs/{{run_id}}/state.json")
+  sandbox_root: (path, default "${TMPDIR:-/tmp}/{{project.id}}-mahoraga-sandboxes")   # NOT a macOS /private/tmp default
+
+# ---- runtime resilience ----
+runtime:
+  implementer_wave: (int, default 3)   # max concurrent fresh implementer subagents
+  reviewer_wave:    (int, default 6)   # max concurrent read-only reviewers
+  stall_watch_secs: (int, default 90)
+  max_restages:     (int, default 4)
+
+# ---- the closed improve loop (core/loop; see docs/LOOP.md): read only by `mahoraga loop` ----
+loop:
+  inputs_dir: (path, required by `loop prove`)     # <inputs_dir>/<unit>/SPEC.md + BUSINESS_REQUIREMENT.md, written from ticket text only (never from the human diff)
+  build:
+    image:  (str, required with the docker runner)  # verify.build_cmd / typecheck_cmd run in it: no network, read-only root, the repo at /w
+    mounts: (list, default [])                      # "host:container" pairs, mounted READ-ONLY (a pre-provisioned dependency cache, build settings)
+
+# ---- security (skills execute code — see SECURITY.md) ----
+security:
+  default_allowed_tools: (list, default ["Read","Grep","Glob"])  # forged skills declare least privilege; deny net/shell unless required
+  forge_read_only:       (bool, default true)                    # the forge never writes to the team's repos/tracker/docs

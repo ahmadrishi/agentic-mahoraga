@@ -1,0 +1,581 @@
+#!/bin/sh
+# mahoraga — the product-surface dispatcher for Agentic Mahoraga.
+#
+# Portable POSIX sh (no bashisms, no arrays, no `local`). Its identity is read at
+# runtime from branding.yaml (the single source of truth), so a later rename is a
+# one-file change — this script hard-codes no display name.
+#
+# Verbs (each maps to a Claude Code skill/slash-command that does the real work):
+#   init     discover the stack and DRAFT a PROJECT.yaml for you to confirm  (the one setup gate)
+#   adapt    forge the grounded mapping (+ spec) skills for this project
+#   prove    blind-reimplement your shipped units and score them adversarially
+#   improve  turn prove findings into human-approved skill edits
+#   retest   re-run the failed units with the improved skills (same units — not a held-out test)
+#   install  copy/symlink the stack-agnostic GUARD pack into another agent (cursor/windsurf/codex/…)
+#
+# Only `init` and `install` run locally (init drafts a config; install copies the GUARD
+# pack). The other four are heavy, model-driven operations that run INSIDE Claude Code;
+# this CLI explains each and points you at its slash command + engine skill.
+
+set -u
+
+# ----------------------------------------------------------------------------
+# Locate MAHORAGA_HOME (the dir holding branding.yaml, core/schema, skills, commands).
+# Resolve this script's own path (following one level of symlinks the portable way,
+# since macOS has no `readlink -f`), then search upward for branding.yaml.
+# ----------------------------------------------------------------------------
+_self=$0
+while [ -h "$_self" ]; do
+  _ls=$(ls -ld "$_self")
+  _link=${_ls##*-> }
+  case $_link in
+    /*) _self=$_link ;;
+    *)  _self=$(dirname "$_self")/$_link ;;
+  esac
+done
+SCRIPT_DIR=$(cd "$(dirname "$_self")" 2>/dev/null && pwd)
+
+find_home() {
+  _d=$1
+  while [ -n "$_d" ] && [ "$_d" != "/" ]; do
+    if [ -f "$_d/branding.yaml" ]; then
+      printf '%s\n' "$_d"
+      return 0
+    fi
+    _d=$(dirname "$_d")
+  done
+  return 1
+}
+
+if [ -n "${MAHORAGA_HOME:-}" ]; then
+  HOME_DIR=$MAHORAGA_HOME
+else
+  HOME_DIR=$(find_home "$SCRIPT_DIR" || true)
+fi
+if [ -z "${HOME_DIR:-}" ] || [ ! -f "$HOME_DIR/branding.yaml" ]; then
+  echo "mahoraga: cannot find branding.yaml (set MAHORAGA_HOME to the repo root)" >&2
+  exit 1
+fi
+BRANDING="$HOME_DIR/branding.yaml"
+SCHEMA="$HOME_DIR/core/schema/PROJECT.schema.yaml"
+
+# ----------------------------------------------------------------------------
+# brand <key> — read a value from branding.yaml. Every value there is double-quoted;
+# we extract the text between the first pair of double quotes, else fall back to a
+# comment-stripped bareword.
+# ----------------------------------------------------------------------------
+brand() {
+  _line=$(grep -E "^$1:" "$BRANDING" 2>/dev/null | head -n1)
+  case $_line in
+    *'"'*'"'*)
+      _v=${_line#*\"}; _v=${_v%%\"*}; printf '%s\n' "$_v" ;;
+    *)
+      _v=${_line#*:}; _v=${_v%%#*}
+      _v=$(printf '%s' "$_v" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      printf '%s\n' "$_v" ;;
+  esac
+}
+
+NAME=$(brand display_name);      [ -n "$NAME" ] || NAME="Agentic Mahoraga"
+CLI=$(brand cli_name);           [ -n "$CLI" ]  || CLI="mahoraga"
+TAGLINE=$(brand tagline)
+MOTTO=$(brand motto)
+
+# ----------------------------------------------------------------------------
+# Help
+# ----------------------------------------------------------------------------
+usage() {
+  cat <<USAGE
+$NAME — $CLI
+
+$TAGLINE
+
+Usage:
+  $CLI <command> [options]
+
+Commands:
+  init      Discover this repo's stack and DRAFT a PROJECT.yaml for you to confirm.
+            The one setup gate; nothing else runs until you approve the draft.
+  adapt     Forge the grounded <project>-mapping (+ <project>-spec) skills.
+  prove     Blind-reimplement your shipped units, then score them adversarially
+            against the human diff as a REFERENCE (never a match target), decontaminated.
+  improve   Turn prove findings into human-approved skill edits.
+  retest    Re-run the previously-failed units with the improved skills (same units — not a held-out test).
+  install   Copy or symlink the stack-agnostic GUARD pack into another agent's skills dir
+            (cursor/windsurf/codex/generic/claude). Prose disciplines only — the GUARD
+            HOOKS are a Claude-Code primitive and do NOT port. Runs locally.
+  loop      The measured improve loop (core/loop/README.md; Linux + Docker). 'preflight': the
+            boundary probe (free) and, with --paid, the skill canary. 'prove': a blind PROVE
+            (units x arms x k). 'run': learn from earlier units, write one candidate, judge it
+            on held-out units by the sealed rule (docs/LOOP.md). 'gate': judge a given
+            candidate. 'promote': write a valid KEEP to the project (interactive). Also
+            'insample' (the kill test) and 'status'.
+
+Options:
+  -h, --help       Show this help (or '$CLI <command> --help').
+  -v, --version    Print the skill-schema version and exit.
+
+Notes:
+  * 'init' and 'install' run locally. 'adapt', 'prove', 'improve', and 'retest' are
+    model-driven operations that run INSIDE Claude Code — each command prints the slash
+    command and engine skill to invoke there.
+  * GUARD (the stack-agnostic behavioral pack) needs no per-project step.
+    Use '$CLI install' to copy it into another agent (cursor/windsurf/codex).
+  * $MOTTO
+USAGE
+}
+
+version() {
+  _sv=$(brand skill_schema_version); [ -n "$_sv" ] || _sv="0.1.0"
+  printf '%s (%s) — skill-schema %s\n' "$CLI" "$NAME" "$_sv"
+}
+
+# ----------------------------------------------------------------------------
+# Shared: describe a model-driven verb (adapt/prove/improve/retest).
+#   $1 verb  $2 slash-command  $3 one-line summary  $4 engine skill(s)  $5 detail block
+# ----------------------------------------------------------------------------
+describe_verb() {
+  _verb=$1; _cmd=$2; _sum=$3; _skills=$4; _detail=$5
+  cat <<INFO
+$CLI $_verb — $_sum
+
+This step runs inside Claude Code (that is where the skills and subagents live).
+
+  1. Confirm ./PROJECT.yaml exists and is reviewed  ($CLI init drafts it).
+  2. Open Claude Code in this repo.
+  3. Run the slash command:
+
+        /$_cmd \$ARGS
+
+     It invokes the engine skill(s): $_skills
+
+$_detail
+
+Reference: $SCHEMA
+INFO
+}
+
+# ----------------------------------------------------------------------------
+# init — guided stack discovery -> draft PROJECT.yaml (the one setup gate).
+# M0: single-repo guided scaffold. TODO(M1): multi-repo auto-discovery, richer
+# build-tool introspection, and tracker/spec locator inference (see below).
+# ----------------------------------------------------------------------------
+cmd_init() {
+  SCAN=.
+  OUT=./PROJECT.yaml
+  FORCE=0
+  CLAUDE_MD=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -h|--help)
+        cat <<H
+$CLI init — discover this repo's stack and draft a PROJECT.yaml.
+
+Usage: $CLI init [--path <repo-dir>] [--out <file>] [--force] [--no-claude-md]
+
+  --path <dir>     Repo to scan for stack markers (default: current directory).
+  --out <file>     Where to write the draft (default: ./PROJECT.yaml).
+  --force          Overwrite an existing draft (and regenerate CLAUDE.md).
+  --no-claude-md   Skip writing the starter CLAUDE.md next to the draft.
+
+Discovery is best-effort (M0). It writes a DRAFT you must review and correct —
+that review is the one setup gate. Deeper auto-discovery is TODO(M1).
+
+It also drafts a CLAUDE.md (agent orientation, from the PROJECT.yaml) next to the
+draft; an existing CLAUDE.md is left untouched unless --force is given.
+H
+        return 0 ;;
+      --path) shift; SCAN=${1:-.} ;;
+      --out)  shift; OUT=${1:-./PROJECT.yaml} ;;
+      --force) FORCE=1 ;;
+      --claude-md) CLAUDE_MD=1 ;;
+      --no-claude-md) CLAUDE_MD=0 ;;
+      *) echo "$CLI init: unknown option '$1'" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  if [ ! -d "$SCAN" ]; then
+    echo "$CLI init: --path '$SCAN' is not a directory" >&2
+    return 2
+  fi
+  if [ -e "$OUT" ] && [ "$FORCE" -ne 1 ]; then
+    echo "$CLI init: '$OUT' already exists (use --force to overwrite)" >&2
+    return 1
+  fi
+
+  SCAN_ABS=$(cd "$SCAN" && pwd)
+  REPO_NAME=$(basename "$SCAN_ABS")
+  PROJ_ROOT=$(dirname "$SCAN_ABS")
+  # slug: lowercase, non-alphanumeric -> '-'
+  PROJ_ID=$(printf '%s' "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')
+  [ -n "$PROJ_ID" ] || PROJ_ID=project
+
+  # --- language + verify commands (single-repo, marker-based) ---
+  REPO_LANG=unknown
+  VERIFY_BODY='      # TODO: no stack marker recognised — set the language and verify commands by hand.'
+  has() { [ -e "$SCAN_ABS/$1" ]; }
+  pkg_has_script() {  # $1 = script name; true if package.json declares it
+    [ -f "$SCAN_ABS/package.json" ] && grep -q "\"$1\"[[:space:]]*:" "$SCAN_ABS/package.json" 2>/dev/null
+  }
+  if has package.json; then
+    if has tsconfig.json; then REPO_LANG=typescript; else REPO_LANG=javascript; fi
+    VERIFY_BODY='      typecheck_cmd: "npx tsc --noEmit -p tsconfig.json"'
+    if pkg_has_script build; then
+      VERIFY_BODY="$VERIFY_BODY
+      build_cmd:     \"npm ci && npm run build\""
+    fi
+    if pkg_has_script test; then
+      VERIFY_BODY="$VERIFY_BODY
+      test_cmd:      \"npm test\"     # OPTIONAL — real test exec in the blind sandbox needs provisioning (M3)"
+    fi
+  elif has pom.xml; then
+    REPO_LANG=java
+    VERIFY_BODY='      build_cmd:      "mvn -B -Dmaven.test.skip=true clean compile"
+      success_marker: "BUILD SUCCESS"   # grepped from the log, never the wrapper exit code'
+  elif has build.gradle || has build.gradle.kts; then
+    # Gradle builds Java or Kotlin: label by which source files dominate (build output pruned)
+    _src_count() { find "$SCAN_ABS" \( -name build -o -name .gradle -o -name .git \) -prune -o -name "$1" -type f -print 2>/dev/null | wc -l; }
+    if [ "$(_src_count '*.kt')" -gt "$(_src_count '*.java')" ]; then REPO_LANG=kotlin; else REPO_LANG=java; fi
+    VERIFY_BODY='      build_cmd:      "./gradlew --console=plain -x test build"
+      success_marker: "BUILD SUCCESSFUL"'
+  elif has go.mod; then
+    REPO_LANG=go
+    VERIFY_BODY='      build_cmd: "go build ./..."
+      test_cmd:  "go test ./..."   # OPTIONAL — see M3 note in the schema'
+  elif has pyproject.toml || has setup.py || has requirements.txt; then
+    REPO_LANG=python
+    VERIFY_BODY='      typecheck_cmd: "python -m mypy ."     # if mypy is configured; else drop this line
+      test_cmd:      "python -m pytest -q"  # OPTIONAL — real test exec in the sandbox needs provisioning (M3)'
+  elif has Cargo.toml; then
+    REPO_LANG=rust
+    VERIFY_BODY='      build_cmd: "cargo build"
+      test_cmd:  "cargo test"'
+  fi
+
+  # --- tracker (from the git remote, best-effort) ---
+  REMOTE=
+  BASE_BRANCH=main
+  if command -v git >/dev/null 2>&1; then
+    REMOTE=$(git -C "$SCAN_ABS" remote get-url origin 2>/dev/null || true)
+    _head=$(git -C "$SCAN_ABS" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+    case $_head in origin/*) BASE_BRANCH=${_head#origin/} ;; esac
+  fi
+  case $REMOTE in
+    *github.com[:/]*)
+      _or=${REMOTE#*github.com}; _or=${_or#:}; _or=${_or#/}; _or=${_or%.git}
+      TRACKER_ADAPTER=github-pr
+      TRACKER_BODY="  config:
+    repo: \"$_or\"          # owner/name — CONFIRM (parsed from the git remote)
+    base_branch: \"$BASE_BRANCH\"
+    labels_exclude: []          # labels marking non-human/automated PRs to skip"
+      ;;
+    *)
+      TRACKER_ADAPTER=none
+      TRACKER_BODY="  config:
+    source: last-merged-prs     # no recognised PR host — operate on merged PRs directly
+    n: 20
+    # TODO(M1): if you use jira/linear/gitea, switch adapter + fill its config block (see docs/ADAPTER-CONTRACT.md)."
+      ;;
+  esac
+
+  # --- spec source (generic default) ---
+  SPEC_ADAPTER=markdown
+  SPEC_BODY='  config:
+    glob: "docs/**/*.md"        # where design/requirement docs live — adjust or switch adapter
+  # untranscribable: ["figma", "whiteboard-image"]   # spec formats that force task exclusion'
+  if [ ! -d "$SCAN_ABS/docs" ]; then
+    SPEC_ADAPTER=none
+    SPEC_BODY='  config: {}
+    # No docs/ dir found. If specs live in PR descriptions use adapter "issue-body";
+    # for Confluence/Notion/GDocs see docs/ADAPTER-CONTRACT.md (they ship text-extract-only).'
+  fi
+
+  # --- write the draft ---
+  # Part A: discovered head (variables expand).
+  cat > "$OUT" <<HEAD
+# PROJECT.yaml — DRAFT written by '$CLI init' ($(date -u +%Y-%m-%dT%H:%M:%SZ)).
+# Guided single-repo scaffold (M0). REVIEW AND CORRECT every value below — that review
+# is the one setup gate. Schema + field docs: core/schema/PROJECT.schema.yaml.
+# TODO(M1): multi-repo discovery, deeper build-tool introspection, tracker/spec inference.
+
+project:
+  id:   "$PROJ_ID"
+  name: "$REPO_NAME"
+  root: "$PROJ_ROOT"          # absolute dir that CONTAINS the repo(s) below
+
+repos:
+  - name:     "$REPO_NAME"
+    language: "$REPO_LANG"       # selects the decontamination token heuristic + diff-exclude set
+    verify:
+$VERIFY_BODY
+
+tracker:
+  adapter: $TRACKER_ADAPTER
+$TRACKER_BODY
+
+spec:
+  adapter: $SPEC_ADAPTER
+$SPEC_BODY
+
+vcs:
+  adapter: git
+  base_branch: "$BASE_BRANCH"
+
+skills:
+  source_dir: "$SCAN_ABS/.claude/skills"   # this project's live skills, copied into every sandbox
+  # index_file: SKILLS_INDEX.md
+  derived_skills: []                        # skills tuned from prove tasks (need SKILL.sanitized.md before any blind run)
+HEAD
+
+  # Part B: static defaults (literal — no expansion; keeps \${TMPDIR} intact).
+  cat >> "$OUT" <<'TAIL'
+
+selection:
+  n: 10
+  lookback_days: 120
+  complexity_spread: true
+  require_multi_repo: true     # force some cross-repo tasks (the lost-context probe)
+
+decontamination:
+  answer_tokens: {}            # per-unit symbols the sandbox skills must NOT contain (filled as units are evaluated)
+  exclusion: []                # already-evaluated units; never re-select; appended each run
+  cutoff_policy:
+    require_post_cutoff_for_headline: true
+    # model_cutoff: "2025-01-01"     # ISO date; units merged after this are cutoff-clean
+    repo_visibility: unknown         # private | public | unknown  (public -> eval labelled "cutoff-unverified")
+
+output:
+  run_dir:      "eval-run/{{project.id}}-runs/{{run_id}}"
+  state_file:   "eval-run/{{project.id}}-runs/{{run_id}}/state.json"
+  sandbox_root: "${TMPDIR:-/tmp}/{{project.id}}-mahoraga-sandboxes"
+
+runtime:
+  implementer_wave: 3
+  reviewer_wave:    6
+  stall_watch_secs: 90
+  max_restages:     4
+
+security:
+  default_allowed_tools: ["Read", "Grep", "Glob"]   # forged skills declare least privilege
+  forge_read_only: true                             # the forge never writes to your repos/tracker/docs
+TAIL
+
+  # --- summary + the confirmation gate ---
+  cat <<SUMMARY
+Drafted $OUT
+
+  project.id        $PROJ_ID
+  repo              $REPO_NAME  (language: $REPO_LANG)
+  project.root      $PROJ_ROOT
+  tracker.adapter   $TRACKER_ADAPTER
+  spec.adapter      $SPEC_ADAPTER
+  vcs.base_branch   $BASE_BRANCH
+
+This is a DRAFT from shallow discovery. REVIEW it — especially the verify commands,
+the tracker config, the spec source, and skills.source_dir — then correct anything wrong.
+That review is the one setup gate.
+
+Next: open Claude Code in this repo and run  /mahoraga-adapt  to forge its skills.
+SUMMARY
+
+  # --- CLAUDE.md (M4): draft an agent-orientation file from the PROJECT.yaml. ---
+  # Best-effort and non-fatal: init succeeds even if this step is skipped or fails.
+  if [ "$CLAUDE_MD" -eq 1 ]; then
+    _cmd_dir=$(dirname "$OUT")
+    _claude_out="$_cmd_dir/CLAUDE.md"
+    _gen="$HOME_DIR/core/lib/gen_claude_md.py"
+    if [ -e "$_claude_out" ] && [ "$FORCE" -ne 1 ]; then
+      echo "CLAUDE.md: '$_claude_out' exists — left untouched (use --force to regenerate)."
+    elif ! command -v python3 >/dev/null 2>&1; then
+      echo "CLAUDE.md: skipped — python3 not found."
+    elif [ ! -f "$_gen" ]; then
+      echo "CLAUDE.md: skipped — generator not found ($_gen)."
+    elif python3 "$_gen" "$OUT" --out "$_claude_out" >/dev/null 2>&1; then
+      echo "Also drafted $_claude_out (agent orientation; regenerate anytime from $OUT)."
+    else
+      echo "CLAUDE.md: generation failed — is PyYAML installed? (try: python3 $_gen $OUT)"
+    fi
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# install — copy/symlink the stack-agnostic GUARD pack into another agent's skills dir.
+#
+# Installs ONLY the GUARD pack (skills/guard/*, the stack-agnostic disciplines), NOT the
+# adapt/prove ENGINE meta-skills (Claude-Code-oriented; stripped from blind sandboxes, so
+# not cross-agent disciplines). Default target ~/.agents/skills (the generic cross-agent
+# convention); default action copy; --symlink links; --dry-run prints only. Idempotent
+# (re-running updates in place) and never writes outside --target. No new deps.
+# ----------------------------------------------------------------------------
+cmd_install() {
+  AGENT=generic
+  TARGET="${HOME:-}/.agents/skills"
+  MODE=copy
+  DRY=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -h|--help)
+        cat <<H
+$CLI install — copy or symlink the stack-agnostic GUARD pack into another agent's skills dir.
+
+Usage: $CLI install [--agent cursor|windsurf|codex|generic|claude] [--target DIR]
+                    [--symlink|--copy] [--dry-run]
+
+  --agent <name>   Cross-agent convention/label used in the messaging (default: generic).
+  --target <dir>   Where to install (default: ~/.agents/skills — the generic convention).
+  --copy           Copy each skill dir (default; portable and self-contained).
+  --symlink        Symlink to the in-repo skills instead (tracks the source; not portable).
+  --dry-run        Print what would happen; write nothing.
+
+Installs ONLY the GUARD pack — the stack-agnostic behavioral disciplines. It does NOT
+install the adapt/prove engine skills (Claude-Code-oriented; stripped from blind sandboxes).
+Idempotent (re-running updates in place); never writes outside --target.
+
+CAVEAT: the GUARD HOOKS (small-diff / verify) are a Claude-Code primitive and do NOT port.
+On other agents GUARD runs as skill-prose disciplines, not hard gates.
+H
+        return 0 ;;
+      --agent)   shift; AGENT=${1:-} ;;
+      --target)  shift; TARGET=${1:-} ;;
+      --symlink) MODE=symlink ;;
+      --copy)    MODE=copy ;;
+      --dry-run) DRY=1 ;;
+      *) echo "$CLI install: unknown option '$1'" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  case $AGENT in
+    cursor|windsurf|codex|generic|claude) ;;
+    *) echo "$CLI install: --agent must be one of cursor|windsurf|codex|generic|claude (got '$AGENT')" >&2
+       return 2 ;;
+  esac
+  if [ -z "$TARGET" ]; then
+    echo "$CLI install: --target requires a non-empty directory" >&2
+    return 2
+  fi
+
+  # Locate the GUARD pack relative to the CLI, robustly: HOME_DIR (the resolved repo root
+  # that holds branding.yaml) is the primary anchor; fall back to $SCRIPT_DIR/../skills/guard.
+  GUARD_SRC="$HOME_DIR/skills/guard"
+  [ -d "$GUARD_SRC" ] || GUARD_SRC="$SCRIPT_DIR/../skills/guard"
+  if [ ! -d "$GUARD_SRC" ]; then
+    echo "$CLI install: cannot locate the GUARD pack (expected the repo's skills/guard)" >&2
+    return 1
+  fi
+  GUARD_SRC=$(cd "$GUARD_SRC" && pwd)
+
+  # Prominent caveat (contract-fixed wording) — always printed, to stderr so it stays visible.
+  DRYTAG=""
+  [ "$DRY" -eq 1 ] && DRYTAG=" (dry-run)"
+  cat >&2 <<CAVEAT
+======================================================================
+  GUARD pack install — $MODE$DRYTAG
+  agent: $AGENT     target: $TARGET
+----------------------------------------------------------------------
+  CAVEAT: GUARD hooks (small-diff / verify) are a Claude-Code primitive
+  and do NOT port; on $AGENT GUARD runs as skill-prose disciplines, not
+  hard gates.
+======================================================================
+CAVEAT
+  if [ "$AGENT" = claude ]; then
+    echo "  note: on Claude Code the enforceable hooks ship with the PLUGIN, not this" >&2
+    echo "        skill copy — install the plugin for the hard gates." >&2
+  fi
+
+  if [ "$DRY" -eq 0 ]; then
+    mkdir -p "$TARGET" || { echo "$CLI install: cannot create target '$TARGET'" >&2; return 1; }
+    TARGET=$(cd "$TARGET" && pwd)
+  fi
+
+  # Each GUARD skill is a subdir of skills/guard containing a SKILL.md; the '*/' glob skips
+  # the pack README. Install each into --target as a top-level skill dir (the ~/.agents/skills
+  # convention). Idempotent: replace an existing dest in place (always inside --target).
+  count=0
+  for src in "$GUARD_SRC"/*/; do
+    [ -d "$src" ] || continue
+    src=${src%/}
+    [ -f "$src/SKILL.md" ] || continue
+    skill=$(basename "$src")
+    dest="$TARGET/$skill"
+    count=$((count + 1))
+    if [ "$DRY" -eq 1 ]; then
+      printf '  [dry-run] %s  %s -> %s\n' "$MODE" "$skill" "$dest"
+      continue
+    fi
+    rm -rf "$dest"
+    if [ "$MODE" = symlink ]; then
+      ln -s "$src" "$dest"
+      printf '  symlink  %s -> %s\n' "$skill" "$src"
+    else
+      cp -R "$src" "$TARGET/"
+      printf '  copy     %s -> %s\n' "$skill" "$dest"
+    fi
+  done
+
+  if [ "$count" -eq 0 ]; then
+    echo "$CLI install: no GUARD skills found under $GUARD_SRC" >&2
+    return 1
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    printf '\n[dry-run] would install %d GUARD skill(s) into %s (%s). Nothing written.\n' "$count" "$TARGET" "$MODE"
+  else
+    printf '\nInstalled %d GUARD skill(s) into %s (%s).\n' "$count" "$TARGET" "$MODE"
+    printf 'These are prose disciplines; on %s they are guidance, not enforced gates (see caveat above).\n' "$AGENT"
+  fi
+}
+
+# ----------------------------------------------------------------------------
+# Dispatch
+# ----------------------------------------------------------------------------
+CMD=${1:-}
+[ $# -gt 0 ] && shift
+
+case $CMD in
+  ''|-h|--help|help) usage ;;
+  -v|--version)      version ;;
+  init)  cmd_init "$@" ;;
+  install) cmd_install "$@" ;;
+  loop)  exec python3 "$HOME_DIR/core/loop/loop.py" "$@" ;;
+  adapt)
+    describe_verb adapt mahoraga-adapt \
+      "forge the grounded mapping (+ spec) skills for this project" \
+      "codebase-mapping-forge (always) and spec-style-forge (where a doc corpus exists)" \
+      "ADAPT reads your code to forge a <project>-mapping skill (file:line grounded), and where
+a spec corpus exists a <project>-spec skill. It also generates a CLAUDE.md. The forge is
+instructed to stay read-only on your repos and to surface every forged skill as a diff; your
+Claude Code permission prompts are what enforce that."
+    ;;
+  prove)
+    describe_verb prove mahoraga-prove \
+      "blind-reimplement your shipped units and score them adversarially" \
+      "blind-eval, sandbox-isolation, adversarial-review-loop" \
+      "PROVE selects N shipped units, re-implements each BLIND in a decontaminated, history-free
+sandbox, then scores it (reviewer -> red-team -> reconciling verifier) against the human diff
+as a REFERENCE, never a match target. It reports an ablation baseline (no forged skills, no
+GUARD) on the same units. A HEADLINE number must come from private/post-cutoff work."
+    ;;
+  improve)
+    describe_verb improve mahoraga-improve \
+      "turn prove findings into human-approved skill edits" \
+      "skill-improvement-loop (findings -> skill edits/new)" \
+      "IMPROVE clusters the prove findings, proposes EDIT-existing (preferred) or NEW skills,
+adversarially reviews each for best practice, and surfaces the skill diffs for your approval
+(the approval gate). It classifies skill-gap vs spec-gap so the loop terminates honestly, and
+registers every new/edited skill for decontamination before any retest can read it back."
+    ;;
+  retest)
+    describe_verb retest mahoraga-retest \
+      "re-run the failed units with the improved skills (same units — not a held-out test)" \
+      "skill-improvement-loop (retest phase)" \
+      "RETEST re-stages each previously-failed unit with the IMPROVED skills at the same
+fork-point, re-decontaminates (answer-token count MUST be 0 or the retest is open-book),
+re-implements blind, and re-scores. The fix holds only if the failed criterion is now 'full'
+in the code result — not merely that the skill reads better. These are the units the edits
+came from, so a pass does not show the edits generalise."
+    ;;
+  *)
+    echo "$CLI: unknown command '$CMD' (try '$CLI --help')" >&2
+    exit 2 ;;
+esac
